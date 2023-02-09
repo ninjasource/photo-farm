@@ -1,0 +1,20 @@
+[package]
+name = "photo-farm"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["David Haig"]
+repository = "https://github.com/ninjasource/photo-farm.git"
+description = "A photo viewer that lets you quickly choose photos from a large collection"
+keywords = ["image", "jpg", "viewer"]
+categories = ["graphics", "multimedia", "rendering"]
+readme = "README.md"
+
+[dependencies]
+speedy2d = "1.9.0"
+simple_logger = { version = "1.11", default-features = false, features = ["colors"] }
+image = { version = "0.24.5", default-features = false, features = ["jpeg", "jpeg_rayon"]}
+log = "0.4"
+sqlite = "0.30.3"
+thiserror = "1.0.38"
+kamadak-exif = "0.5.5"
