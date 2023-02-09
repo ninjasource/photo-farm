@@ -1,8 +1,12 @@
-# photo-farm
+# Photo Farm
+
+<img src="img/index.png">
+
 A photo viewer written in Rust that lets you quickly choose photos from a large collection.
 It was designed specifically to work with SLR-type photo collections where the user needs to chose between a large selection of similar images.
 
 Cross platform - Windows, Linux, MacOS
+
 
 ## How to use it
 
