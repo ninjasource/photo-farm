@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{env, thread};
 
-use exif::{In, Tag};
+use exif::{Exif, In, Tag};
 use image::imageops::FilterType;
 use image::DynamicImage;
 use log::info;
@@ -48,8 +48,15 @@ pub struct ImageNamePair {
     pub other_file_names: Vec<String>,
 }
 
+#[derive(Debug)]
 struct ImageMetadata {
     orientation: Option<u32>,
+    iso: Option<String>,
+    model: Option<String>,
+    exposure_time: Option<String>,
+    f_number: Option<String>,
+    date_time: Option<String>,
+    focal_length: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -231,7 +238,29 @@ fn get_metadata(path: &str, name: &str) -> Result<ImageMetadata, Error> {
         None
     };
 
-    Ok(ImageMetadata { orientation })
+    let iso = get_exif_string(&exif, Tag::PhotographicSensitivity);
+    let model = get_exif_string(&exif, Tag::Model);
+    let exposure_time = get_exif_string(&exif, Tag::ExposureTime);
+    let f_number = get_exif_string(&exif, Tag::FNumber);
+    let date_time = get_exif_string(&exif, Tag::DateTime);
+    let focal_length = get_exif_string(&exif, Tag::FocalLength);
+
+    Ok(ImageMetadata {
+        orientation,
+        iso,
+        model,
+        exposure_time,
+        f_number,
+        date_time,
+        focal_length,
+    })
+}
+
+fn get_exif_string(exif: &Exif, tag: Tag) -> Option<String> {
+    match exif.get_field(tag, In::PRIMARY) {
+        Some(field) => Some(field.display_value().with_unit(exif).to_string()),
+        None => None,
+    }
 }
 
 fn load_image(path: &str, name: &str) -> Result<DynamicImage, Error> {
@@ -240,17 +269,14 @@ fn load_image(path: &str, name: &str) -> Result<DynamicImage, Error> {
     let reader = BufReader::new(&file);
     let img = image::load(reader, image::ImageFormat::Jpeg).unwrap();
 
+    let metadata = get_metadata(path, name)?;
+    info!("{:?}", metadata);
+
     // rotate image if it contains exif metadata to do so
-    let img = match get_metadata(path, name) {
-        Ok(ImageMetadata {
-            orientation: Some(8),
-        }) => img.rotate270(),
-        Ok(ImageMetadata {
-            orientation: Some(3),
-        }) => img.rotate180(),
-        Ok(ImageMetadata {
-            orientation: Some(6),
-        }) => img.rotate90(),
+    let img = match metadata.orientation {
+        Some(8) => img.rotate270(),
+        Some(3) => img.rotate180(),
+        Some(6) => img.rotate90(),
         _ => img, // do nothing
     };
 
@@ -494,10 +520,9 @@ impl WindowHandler for MyWindowHandler {
                         .unwrap()
                         {
                             Some(db_image) => {
-                                let image =
-                                    draw_image(self.screen_resolution, &db_image.resized, graphics);
+                                let image = draw_image(self.screen_resolution, &db_image, graphics);
                                 self.image = Some(image);
-                                self.is_starred = db_image.is_starred;
+                                // self.is_starred = db_image.is_starred;
                             }
                             None => {
                                 // draw an hourglass to the screen to indicate loading

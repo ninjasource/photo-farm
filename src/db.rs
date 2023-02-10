@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use exif::DateTime;
 use log::info;
 use speedy2d::dimen::UVec2;
 use sqlite::{Connection, State, Value};
@@ -19,8 +20,8 @@ const DB_COL_RESIZED: &str = "resized";
 const DB_COL_IS_STARRED: &str = "is_starred";
 
 pub struct DbImage {
-    pub resized: Vec<u8>,
     pub is_starred: bool,
+    pub date_time: DateTime,
 }
 
 pub fn photo_exists(
@@ -53,11 +54,12 @@ pub fn try_get_image_from_db(
     name: &str,
     size: UVec2,
     connection: Arc<Mutex<Connection>>,
-) -> Result<Option<DbImage>, Error> {
+) -> Result<Option<Vec<u8>>, Error> {
     let connection = connection.lock().unwrap();
 
+    // even if there is an entry in the db there may not yet be a resized image
     let query = format!(
-        "SELECT {DB_COL_RESIZED}, {DB_COL_IS_STARRED} FROM {DB_TABLE_PHOTOS} WHERE {DB_COL_NAME} = :{DB_COL_NAME} AND {DB_COL_X_RES} = :{DB_COL_X_RES} AND {DB_COL_Y_RES} = :{DB_COL_Y_RES};"
+        "SELECT {DB_COL_RESIZED} FROM {DB_TABLE_PHOTOS} WHERE {DB_COL_NAME} = :{DB_COL_NAME} AND {DB_COL_X_RES} = :{DB_COL_X_RES} AND {DB_COL_Y_RES} = :{DB_COL_Y_RES} AND NOT {DB_COL_RESIZED} IS NULL;"
     );
 
     let mut statement = connection.prepare(query)?;
@@ -75,11 +77,7 @@ pub fn try_get_image_from_db(
     match statement.next()? {
         State::Row => {
             let resized = statement.read::<Vec<u8>, _>(DB_COL_RESIZED)?;
-            let is_starred = statement.read::<i64, _>(DB_COL_IS_STARRED)? != 0;
-            Ok(Some(DbImage {
-                resized,
-                is_starred,
-            }))
+            Ok(Some(resized))
         }
         State::Done => Ok(None),
     }
