@@ -3,6 +3,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     str::FromStr,
+    time::SystemTime,
 };
 
 use crate::{Error, ImageNamePair};
@@ -27,15 +28,19 @@ pub fn get_file_names(path: &str) -> Result<Vec<ImageNamePair>, Error> {
     let items: Vec<ImageNamePair> = jpegs
         .into_iter()
         .map(|jpeg| {
-            let name = get_lowercase_name_without_extension(&jpeg);
+            let name = get_lowercase_name_without_extension(&jpeg.0);
             match lookup.remove(&name) {
                 Some(files) => ImageNamePair {
-                    jpg_file_name: jpeg,
+                    jpg_file_name: jpeg.0,
                     other_file_names: files,
+                    date_time: jpeg.1,
+                    is_starred: false,
                 },
                 None => ImageNamePair {
-                    jpg_file_name: jpeg,
+                    jpg_file_name: jpeg.0,
                     other_file_names: vec![],
+                    date_time: jpeg.1,
+                    is_starred: false,
                 },
             }
         })
@@ -46,7 +51,7 @@ pub fn get_file_names(path: &str) -> Result<Vec<ImageNamePair>, Error> {
 
 pub fn get_full_path(path: &str, name: &str) -> String {
     PathBuf::from_str(path)
-        .expect(&format!("not a falid path: {path}"))
+        .unwrap_or_else(|_| panic!("not a falid path: {path}"))
         .join(name)
         .to_str()
         .expect("full path is empty")
@@ -59,21 +64,24 @@ fn get_lowercase_name_without_extension(name: &str) -> String {
     name.to_lowercase()
 }
 
-fn get_image_file_names(path: &str) -> Result<Vec<String>, Error> {
+fn get_image_file_names(path: &str) -> Result<Vec<(String, SystemTime)>, Error> {
     let directory = std::fs::read_dir(path)?;
-    let mut files: Vec<String> = directory
+    let mut files: Vec<(String, SystemTime)> = directory
         .filter_map(|x| {
             let path = x.expect("cannot read directory");
-            let path = path.file_name();
-            let path = path.to_str().expect("image file name is empty");
-            if path.to_lowercase().ends_with(".jpg") || path.to_lowercase().ends_with(".jpeg") {
-                Some(path.to_owned())
+            let file_name = path.file_name();
+            let file_name = file_name.to_str().expect("image file name is empty");
+            if file_name.to_lowercase().ends_with(".jpg")
+                || file_name.to_lowercase().ends_with(".jpeg")
+            {
+                let date_time = path.metadata().unwrap().created().unwrap();
+                Some((file_name.to_owned(), date_time))
             } else {
                 None
             }
         })
         .collect();
-    files.sort();
+    files.sort_by(|a, b| a.1.cmp(&b.1));
 
     Ok(files)
 }
@@ -97,8 +105,9 @@ fn get_other_file_names(path: &str) -> Result<Vec<String>, Error> {
     Ok(files)
 }
 
-pub fn export(path: &str, image_pairs: &Vec<&ImageNamePair>) -> Result<(), Error> {
-    let mut to_path = PathBuf::from_str(path).expect(&format!("not a falid path: {path}"));
+pub fn export(path: &str, image_pairs: &[&ImageNamePair]) -> Result<(), Error> {
+    let mut to_path =
+        PathBuf::from_str(path).unwrap_or_else(|_| panic!("not a falid path: {path}"));
     to_path.push("export");
     let to_path = to_path.to_str().expect("path is empty");
     fs::create_dir_all(to_path)?;

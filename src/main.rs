@@ -1,18 +1,18 @@
 use std::fs::File;
-use std::io::{BufReader, Cursor};
+use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 use std::{env, thread};
 
-use exif::{Exif, In, Tag};
 use image::imageops::FilterType;
 use image::DynamicImage;
 use log::info;
 use speedy2d::color::Color;
 use speedy2d::dimen::{UVec2, Vec2};
-use speedy2d::font::{Font, TextAlignment, TextLayout, TextOptions};
-use speedy2d::image::{ImageDataType, ImageHandle, ImageSmoothingMode};
+use speedy2d::font::Font;
+use speedy2d::image::ImageHandle;
 use speedy2d::window::{KeyScancode, UserEventSender, VirtualKeyCode, WindowHandler, WindowHelper};
 use speedy2d::{Graphics2D, Window};
 use sqlite::Connection;
@@ -20,6 +20,8 @@ use thiserror::Error;
 
 mod db;
 mod disk;
+mod draw;
+mod metadata;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -46,17 +48,65 @@ pub struct ImageNamePair {
     /// for example .cr2 raw files with the same name as the jpg
     /// e.g. vec!["IMG_0771.CR2"]
     pub other_file_names: Vec<String>,
+    pub is_starred: bool,
+    pub date_time: SystemTime,
 }
 
-#[derive(Debug)]
-struct ImageMetadata {
-    orientation: Option<u32>,
-    iso: Option<String>,
-    model: Option<String>,
-    exposure_time: Option<String>,
-    f_number: Option<String>,
-    date_time: Option<String>,
-    focal_length: Option<String>,
+struct Images {
+    inner: Vec<ImageNamePair>,
+    index: usize,
+}
+
+impl Images {
+    fn new(name: &str, image_file_names: Vec<ImageNamePair>) -> Self {
+        let index = Self::get_image_index(name, &image_file_names);
+        Self {
+            inner: image_file_names,
+            index,
+        }
+    }
+
+    fn get_image_index(name: &str, image_file_names: &[ImageNamePair]) -> usize {
+        for (i, image_name) in image_file_names.iter().enumerate() {
+            if name == image_name.jpg_file_name {
+                return i;
+            }
+        }
+
+        0
+    }
+
+    fn next(&mut self) {
+        if self.index == self.inner.len() - 1 {
+            self.index = 0
+        } else {
+            self.index += 1
+        }
+    }
+
+    fn prev(&mut self) {
+        if self.index == 0 {
+            self.index = self.inner.len() - 1
+        } else {
+            self.index -= 1;
+        }
+    }
+
+    fn current(&self) -> &ImageNamePair {
+        &self.inner[self.index]
+    }
+
+    fn current_mut(&mut self) -> &mut ImageNamePair {
+        &mut self.inner[self.index]
+    }
+
+    fn current_index(&self) -> usize {
+        self.index
+    }
+
+    fn all(&self) -> &Vec<ImageNamePair> {
+        &self.inner
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -67,6 +117,7 @@ enum RenderState {
     ExportRequested,
     Exporting,
     Help,
+    Metadata,
 }
 
 fn main() -> Result<(), Error> {
@@ -97,48 +148,50 @@ fn main() -> Result<(), Error> {
     info!("Working folder: {path}");
 
     let connection = Arc::new(Mutex::new(db::get_or_create_db(&path)?));
-    let image_file_names = Arc::new(disk::get_file_names(&path)?);
-    if image_file_names.len() == 0 {
+    let image_file_names = build_file_list(&path, connection.clone())?;
+    if image_file_names.is_empty() {
         // no images exit early
         info!("No images");
         return Ok(());
     }
+    let images = Images::new(name, image_file_names);
 
     let window = Window::new_fullscreen_borderless("Image Viewer").expect("cannot create window");
     let screen_resolution = UVec2 { x: 800, y: 600 };
-    let image_index = get_image_index(name, &image_file_names);
-
     let font = Font::new(include_bytes!("../fonts/NotoSans-Regular.ttf")).unwrap();
-
     let progress_percentage = Arc::new(AtomicI32::new(100));
-
     let user_event_sender = Arc::new(Mutex::new(window.create_user_event_sender()));
 
-    window.run_loop(MyWindowHandler {
+    window.run_loop(PhotoWindowHandler {
         image: None,
-        image_index,
-        image_file_names,
+        images,
         screen_resolution,
         connection,
         path,
         state: RenderState::Full,
         font,
-        is_starred: false,
         progress_percentage,
         user_event_sender,
     })
 }
 
-fn get_image_index(name: &str, image_file_names: &Vec<ImageNamePair>) -> usize {
-    for (i, image_name) in image_file_names.iter().enumerate() {
-        if name == image_name.jpg_file_name {
-            return i;
+fn build_file_list(
+    path: &str,
+    connection: Arc<Mutex<Connection>>,
+) -> Result<Vec<ImageNamePair>, Error> {
+    let mut image_file_names = disk::get_file_names(path)?;
+
+    let names = db::get_starred_image_names(connection)?;
+    for file in image_file_names.iter_mut() {
+        if names.contains(&file.jpg_file_name) {
+            file.is_starred = true;
         }
     }
 
-    return 0;
+    Ok(image_file_names)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_cache_image(
     path: &str,
     image_index: usize,
@@ -178,13 +231,19 @@ fn load_and_insert_image(
 ) -> Result<Vec<u8>, Error> {
     let img = load_image(path, name)?;
     let resized = resize_jpg(&img, size)?;
-    db::insert_image(&name, size, &resized, connection)?;
+    db::insert_image(name, size, &resized, connection)?;
     Ok(resized)
+}
+
+pub fn calculate_position_middle(screen_resolution: UVec2, image: &ImageHandle) -> Vec2 {
+    let x = (screen_resolution.x - image.size().x) as f32 / 2.0;
+    let y = (screen_resolution.y - image.size().y) as f32 / 2.0;
+    Vec2 { x, y }
 }
 
 fn update_cache(
     path: String,
-    image_file_names: Arc<Vec<ImageNamePair>>,
+    image_file_names: Vec<String>,
     image_index: usize,
     size: UVec2,
     connection: Arc<Mutex<Connection>>,
@@ -200,7 +259,7 @@ fn update_cache(
             image_file_names.len(),
             size,
             connection.clone(),
-            &name.jpg_file_name,
+            name,
             &mut num_processed,
             progress_percentage.clone(),
             user_event_sender.clone(),
@@ -215,7 +274,7 @@ fn update_cache(
             image_file_names.len(),
             size,
             connection.clone(),
-            &name.jpg_file_name,
+            name,
             &mut num_processed,
             progress_percentage.clone(),
             user_event_sender.clone(),
@@ -226,50 +285,13 @@ fn update_cache(
     Ok(())
 }
 
-fn get_metadata(path: &str, name: &str) -> Result<ImageMetadata, Error> {
-    let file_name = disk::get_full_path(path, name);
-    let file = File::open(&file_name)?;
-    let mut reader = BufReader::new(&file);
-    let exif = exif::Reader::new().read_from_container(&mut reader)?;
-
-    let orientation = if let Some(field) = exif.get_field(Tag::Orientation, In::PRIMARY) {
-        field.value.get_uint(0)
-    } else {
-        None
-    };
-
-    let iso = get_exif_string(&exif, Tag::PhotographicSensitivity);
-    let model = get_exif_string(&exif, Tag::Model);
-    let exposure_time = get_exif_string(&exif, Tag::ExposureTime);
-    let f_number = get_exif_string(&exif, Tag::FNumber);
-    let date_time = get_exif_string(&exif, Tag::DateTime);
-    let focal_length = get_exif_string(&exif, Tag::FocalLength);
-
-    Ok(ImageMetadata {
-        orientation,
-        iso,
-        model,
-        exposure_time,
-        f_number,
-        date_time,
-        focal_length,
-    })
-}
-
-fn get_exif_string(exif: &Exif, tag: Tag) -> Option<String> {
-    match exif.get_field(tag, In::PRIMARY) {
-        Some(field) => Some(field.display_value().with_unit(exif).to_string()),
-        None => None,
-    }
-}
-
 fn load_image(path: &str, name: &str) -> Result<DynamicImage, Error> {
     let file_name = disk::get_full_path(path, name);
-    let file = File::open(&file_name)?;
+    let file = File::open(file_name)?;
     let reader = BufReader::new(&file);
     let img = image::load(reader, image::ImageFormat::Jpeg).unwrap();
 
-    let metadata = get_metadata(path, name)?;
+    let metadata = metadata::get_metadata(path, name)?;
     info!("{:?}", metadata);
 
     // rotate image if it contains exif metadata to do so
@@ -319,153 +341,28 @@ fn resolution_ok(screen_resolution: UVec2) -> bool {
     screen_resolution.x > 800
 }
 
-fn calculate_position_middle(screen_resolution: UVec2, image: &ImageHandle) -> Vec2 {
-    let x = (screen_resolution.x - image.size().x) as f32 / 2.0;
-    let y = (screen_resolution.y - image.size().y) as f32 / 2.0;
-    Vec2 { x, y }
-}
-
-fn draw_star(size: UVec2, graphics: &mut Graphics2D) {
-    let image_bytes = include_bytes!("../img/star_24px.png");
-    let file_bytes = Cursor::new(image_bytes);
-    let image = graphics
-        .create_image_from_file_bytes(None, ImageSmoothingMode::NearestNeighbor, file_bytes)
-        .unwrap(); // complicated error struct
-    let position = Vec2 {
-        x: size.x as f32 - image.size().x as f32 - 10.0,
-        y: 10.0,
-    };
-
-    graphics.draw_image(position, &image);
-}
-
-fn draw_image(size: UVec2, file_bytes: &[u8], graphics: &mut Graphics2D) -> ImageHandle {
-    let file_bytes = Cursor::new(file_bytes);
-    let image = graphics
-        .create_image_from_file_bytes(None, ImageSmoothingMode::NearestNeighbor, file_bytes)
-        .unwrap(); // complicated error struct
-    let position = calculate_position_middle(size, &image);
-    graphics.draw_image(position, &image);
-    image
-}
-
-fn draw_progress_text(
-    size: UVec2,
-    graphics: &mut Graphics2D,
-    font: &Font,
-    progress_percentage: Arc<AtomicI32>,
-) {
-    let percentage = progress_percentage.load(Ordering::Relaxed);
-
-    // only draw progress below 100 percent
-    if percentage < 100 {
-        let percentage = format!("{percentage} %",);
-
-        let text = font.layout_text(
-            &percentage,
-            20.0,
-            TextOptions::new().with_wrap_to_width(200.0, TextAlignment::Left),
-        );
-
-        graphics.draw_text(
-            Vec2 {
-                x: size.x as f32 - text.width() - 10.0,
-                y: size.y as f32 - text.height() - 10.0,
-            },
-            Color::from_rgb(0.9, 0.9, 0.8),
-            &text,
-        );
-    }
-}
-
-fn draw_image_full(img: DynamicImage, graphics: &mut Graphics2D) -> ImageHandle {
-    let size = UVec2 {
-        x: img.width(),
-        y: img.height(),
-    };
-    let image = graphics
-        .create_image_from_raw_pixels(
-            ImageDataType::RGB,
-            ImageSmoothingMode::NearestNeighbor,
-            size,
-            img.as_bytes(),
-        )
-        .unwrap(); // complicated error struct
-
-    graphics.draw_image(Vec2 { x: 0.0, y: 0.0 }, &image);
-    image
-}
-
-fn export(
-    path: &str,
-    image_file_names: &Vec<ImageNamePair>,
-    connection: Arc<Mutex<Connection>>,
-) -> Result<(), Error> {
-    let names = db::get_starred_image_names(connection)?;
-    let starred_images: Vec<&ImageNamePair> = image_file_names
-        .into_iter()
-        .filter(|x| names.contains(&x.jpg_file_name))
-        .collect();
+fn export(path: &str, image_file_names: &[ImageNamePair]) -> Result<(), Error> {
+    let starred_images: Vec<&ImageNamePair> =
+        image_file_names.iter().filter(|x| x.is_starred).collect();
     disk::export(path, &starred_images)?;
     Ok(())
 }
 
-fn draw_help(size: UVec2, graphics: &mut Graphics2D, font: &Font) {
-    let text = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
-        "F1", "SPACE", "LEFT CTRL", "ESC", "LEFT", "RIGHT", "E", "S",
-    );
-    let left_text = font.layout_text(
-        &text,
-        20.0,
-        TextOptions::new().with_wrap_to_width(600.0, TextAlignment::Left),
-    );
-
-    let text = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
-        "Toggle help",
-        "Toggle star",
-        "Hold to zoom in to 1:1",
-        "Exit",
-        "Previous photo",
-        "Next photo",
-        "Export starred photos to 'export' folder",
-        "Toggle show starred photos only"
-    );
-
-    let right_text = font.layout_text(
-        &text,
-        20.0,
-        TextOptions::new().with_wrap_to_width(600.0, TextAlignment::Left),
-    );
-
-    let x_gap = 100.0;
-    let x = size.x as f32 / 2.0 - (left_text.width() + right_text.width() + x_gap) / 2.0;
-    let y = size.y as f32 / 2.0 - left_text.height() / 2.0;
-
-    graphics.draw_text(Vec2 { x, y }, Color::from_rgb(0.9, 0.9, 0.8), &left_text);
-    graphics.draw_text(
-        Vec2 { x: x + x_gap, y },
-        Color::from_rgb(0.6, 0.6, 0.5),
-        &right_text,
-    );
-}
-
-struct MyWindowHandler {
+struct PhotoWindowHandler {
     image: Option<ImageHandle>,
-    image_index: usize,
-    image_file_names: Arc<Vec<ImageNamePair>>,
+    images: Images,
+    //  image_index: usize,
+    //   image_file_names: Vec<ImageNamePair>,
     screen_resolution: UVec2,
     connection: Arc<Mutex<Connection>>,
     path: String,
     state: RenderState,
     font: Font,
-    is_starred: bool,
     progress_percentage: Arc<AtomicI32>,
     user_event_sender: Arc<Mutex<UserEventSender<()>>>,
 }
 
-impl WindowHandler for MyWindowHandler {
+impl WindowHandler for PhotoWindowHandler {
     fn on_user_event(&mut self, helper: &mut WindowHelper<()>, _user_event: ()) {
         helper.request_redraw()
     }
@@ -476,11 +373,16 @@ impl WindowHandler for MyWindowHandler {
 
         // a little trick so that we dont resize on the first call to this on_size function which normally has the generic resolution of 800x600
         if resolution_ok(size_pixels) {
-            let image_file_names = self.image_file_names.clone();
+            let image_file_names = self
+                .images
+                .all()
+                .iter()
+                .map(|x| x.jpg_file_name.clone())
+                .collect();
             let size = size_pixels;
             let connection = self.connection.clone();
             let path = self.path.clone();
-            let image_index = self.image_index;
+            let image_index = self.images.current_index();
             let progress_percentage = self.progress_percentage.clone();
             let user_event_sender = self.user_event_sender.clone();
 
@@ -503,9 +405,8 @@ impl WindowHandler for MyWindowHandler {
         graphics.clear_screen(Color::BLACK);
 
         if resolution_ok(self.screen_resolution) {
-            let name = self.image_file_names[self.image_index]
-                .jpg_file_name
-                .as_str();
+            let image_file = self.images.current();
+            let name = image_file.jpg_file_name.as_str();
 
             if self.image.is_none() {
                 match self.state {
@@ -520,14 +421,14 @@ impl WindowHandler for MyWindowHandler {
                         .unwrap()
                         {
                             Some(db_image) => {
-                                let image = draw_image(self.screen_resolution, &db_image, graphics);
+                                let image =
+                                    draw::image(self.screen_resolution, &db_image, graphics);
                                 self.image = Some(image);
-                                // self.is_starred = db_image.is_starred;
                             }
                             None => {
                                 // draw an hourglass to the screen to indicate loading
                                 let image_bytes = include_bytes!("../img/hourglass.jpg");
-                                draw_image(self.screen_resolution, image_bytes, graphics);
+                                draw::image(self.screen_resolution, image_bytes, graphics);
                                 helper.request_redraw();
                                 self.state = RenderState::LoadingFull;
                             }
@@ -537,7 +438,7 @@ impl WindowHandler for MyWindowHandler {
                         helper.set_cursor_visible(true);
                         let img = load_image(&self.path, name).unwrap();
                         let img = crop_center(img, self.screen_resolution).unwrap();
-                        draw_image_full(img, graphics);
+                        draw::image_full(img, graphics);
                     }
                     RenderState::LoadingFull => {
                         let resized = load_and_insert_image(
@@ -548,23 +449,32 @@ impl WindowHandler for MyWindowHandler {
                         )
                         .unwrap();
 
-                        let image = draw_image(self.screen_resolution, &resized, graphics);
+                        let image = draw::image(self.screen_resolution, &resized, graphics);
                         self.image = Some(image);
                         self.state = RenderState::Full;
                     }
                     RenderState::ExportRequested => {
                         let image_bytes = include_bytes!("../img/hourglass.jpg");
-                        draw_image(self.screen_resolution, image_bytes, graphics);
+                        draw::image(self.screen_resolution, image_bytes, graphics);
                         helper.request_redraw();
                         self.state = RenderState::Exporting;
                     }
                     RenderState::Exporting => {
-                        export(&self.path, &self.image_file_names, self.connection.clone())
-                            .unwrap();
+                        export(&self.path, self.images.all()).unwrap();
                         self.state = RenderState::Full;
                         helper.request_redraw();
                     }
-                    RenderState::Help => draw_help(self.screen_resolution, graphics, &self.font),
+                    RenderState::Help => draw::help(self.screen_resolution, graphics, &self.font),
+                    RenderState::Metadata => {
+                        let metadata = metadata::get_metadata(&self.path, name).unwrap();
+                        draw::metadata(
+                            name,
+                            self.screen_resolution,
+                            graphics,
+                            &self.font,
+                            &metadata,
+                        )
+                    }
                 }
             } else {
                 let image = self.image.as_ref().expect("no image set");
@@ -572,11 +482,11 @@ impl WindowHandler for MyWindowHandler {
                 graphics.draw_image(position, image);
             }
 
-            if self.is_starred {
-                draw_star(self.screen_resolution, graphics);
+            if image_file.is_starred {
+                draw::star(self.screen_resolution, graphics);
             }
 
-            draw_progress_text(
+            draw::progress_text(
                 self.screen_resolution,
                 graphics,
                 &self.font,
@@ -592,47 +502,39 @@ impl WindowHandler for MyWindowHandler {
         scancode: KeyScancode,
     ) {
         match virtual_key_code {
-            Some(VirtualKeyCode::Escape) => {
-                if self.state == RenderState::Help {
+            Some(VirtualKeyCode::Escape) => match self.state {
+                RenderState::Help | RenderState::Metadata => {
                     self.state = RenderState::Full;
                     helper.request_redraw()
-                } else {
-                    std::process::exit(0)
                 }
-            }
+                _ => std::process::exit(0),
+            },
             Some(VirtualKeyCode::Left) => {
                 // prev image
-                if self.image_index == 0 {
-                    self.image_index = self.image_file_names.len() - 1
-                } else {
-                    self.image_index -= 1;
-                }
+                self.images.prev();
                 self.image = None;
-                self.is_starred = false;
                 helper.request_redraw();
             }
             Some(VirtualKeyCode::Right) => {
                 // next image
-                if self.image_index == self.image_file_names.len() - 1 {
-                    self.image_index = 0
-                } else {
-                    self.image_index += 1
-                }
+                self.images.next();
                 self.image = None;
-                self.is_starred = false;
                 helper.request_redraw();
             }
             Some(VirtualKeyCode::LControl) => {
                 self.state = RenderState::Zooming;
                 self.image = None;
-                self.is_starred = false;
                 helper.request_redraw();
             }
             Some(VirtualKeyCode::Space) => {
-                self.is_starred = !self.is_starred;
-                let name = &self.image_file_names[self.image_index].jpg_file_name;
-                db::update_image_is_starred(name, self.is_starred, self.connection.clone())
-                    .unwrap();
+                let image = self.images.current_mut();
+                image.is_starred = !image.is_starred;
+                db::update_image_is_starred(
+                    &image.jpg_file_name,
+                    image.is_starred,
+                    self.connection.clone(),
+                )
+                .unwrap();
                 helper.request_redraw();
             }
             Some(VirtualKeyCode::E) if self.state != RenderState::ExportRequested => {
@@ -645,6 +547,15 @@ impl WindowHandler for MyWindowHandler {
                     self.state = RenderState::Full;
                 } else {
                     self.state = RenderState::Help;
+                }
+                self.image = None;
+                helper.request_redraw()
+            }
+            Some(VirtualKeyCode::F3) => {
+                if self.state == RenderState::Metadata {
+                    self.state = RenderState::Full;
+                } else {
+                    self.state = RenderState::Metadata;
                 }
                 self.image = None;
                 helper.request_redraw()
@@ -665,13 +576,10 @@ impl WindowHandler for MyWindowHandler {
         virtual_key_code: Option<VirtualKeyCode>,
         _scancode: KeyScancode,
     ) {
-        match virtual_key_code {
-            Some(VirtualKeyCode::LControl) => {
-                self.state = RenderState::Full;
-                self.image = None;
-                helper.request_redraw();
-            }
-            _ => {}
+        if let Some(VirtualKeyCode::LControl) = virtual_key_code {
+            self.state = RenderState::Full;
+            self.image = None;
+            helper.request_redraw();
         }
     }
 }

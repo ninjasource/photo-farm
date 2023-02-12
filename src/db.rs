@@ -4,7 +4,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use exif::DateTime;
 use log::info;
 use speedy2d::dimen::UVec2;
 use sqlite::{Connection, State, Value};
@@ -18,11 +17,6 @@ const DB_COL_X_RES: &str = "x_res";
 const DB_COL_Y_RES: &str = "y_res";
 const DB_COL_RESIZED: &str = "resized";
 const DB_COL_IS_STARRED: &str = "is_starred";
-
-pub struct DbImage {
-    pub is_starred: bool,
-    pub date_time: DateTime,
-}
 
 pub fn photo_exists(
     name: &str,
@@ -144,16 +138,9 @@ pub fn get_starred_image_names(
     let mut statement = connection.prepare(query)?;
     let mut names = HashSet::new();
 
-    loop {
-        match statement.next()? {
-            State::Row => {
-                let name = statement.read::<String, _>(DB_COL_NAME)?;
-                names.insert(name);
-            }
-            State::Done => {
-                break;
-            }
-        }
+    while let State::Row = statement.next()? {
+        let name = statement.read::<String, _>(DB_COL_NAME)?;
+        names.insert(name);
     }
 
     Ok(names)
