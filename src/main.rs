@@ -3,12 +3,13 @@ use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
 use std::{env, thread};
 
+use chrono::{NaiveDateTime, ParseError};
 use image::imageops::FilterType;
 use image::DynamicImage;
-use log::info;
+use images::Images;
+use log::{error, info};
 use speedy2d::color::Color;
 use speedy2d::dimen::{UVec2, Vec2};
 use speedy2d::font::Font;
@@ -21,6 +22,7 @@ use thiserror::Error;
 mod db;
 mod disk;
 mod draw;
+mod images;
 mod metadata;
 
 #[derive(Error, Debug)]
@@ -39,6 +41,10 @@ pub enum Error {
     Exif(#[from] exif::Error),
     #[error("no image metadata")]
     NoImageMetadata,
+    #[error("no exif DateTime metadata found")]
+    NoExifDateTime,
+    #[error("invalid DateTime exif tag: {0:?}")]
+    ExifDateTime((String, ParseError)),
 }
 
 #[derive(Debug)]
@@ -49,64 +55,7 @@ pub struct ImageNamePair {
     /// e.g. vec!["IMG_0771.CR2"]
     pub other_file_names: Vec<String>,
     pub is_starred: bool,
-    pub date_time: SystemTime,
-}
-
-struct Images {
-    inner: Vec<ImageNamePair>,
-    index: usize,
-}
-
-impl Images {
-    fn new(name: &str, image_file_names: Vec<ImageNamePair>) -> Self {
-        let index = Self::get_image_index(name, &image_file_names);
-        Self {
-            inner: image_file_names,
-            index,
-        }
-    }
-
-    fn get_image_index(name: &str, image_file_names: &[ImageNamePair]) -> usize {
-        for (i, image_name) in image_file_names.iter().enumerate() {
-            if name == image_name.jpg_file_name {
-                return i;
-            }
-        }
-
-        0
-    }
-
-    fn next(&mut self) {
-        if self.index == self.inner.len() - 1 {
-            self.index = 0
-        } else {
-            self.index += 1
-        }
-    }
-
-    fn prev(&mut self) {
-        if self.index == 0 {
-            self.index = self.inner.len() - 1
-        } else {
-            self.index -= 1;
-        }
-    }
-
-    fn current(&self) -> &ImageNamePair {
-        &self.inner[self.index]
-    }
-
-    fn current_mut(&mut self) -> &mut ImageNamePair {
-        &mut self.inner[self.index]
-    }
-
-    fn current_index(&self) -> usize {
-        self.index
-    }
-
-    fn all(&self) -> &Vec<ImageNamePair> {
-        &self.inner
-    }
+    pub date_time: Option<NaiveDateTime>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -154,8 +103,7 @@ fn main() -> Result<(), Error> {
         info!("No images");
         return Ok(());
     }
-    let images = Images::new(name, image_file_names);
-
+    let images = Images::new(&path, name, image_file_names);
     let window = Window::new_fullscreen_borderless("Image Viewer").expect("cannot create window");
     let screen_resolution = UVec2 { x: 800, y: 600 };
     let font = Font::new(include_bytes!("../fonts/NotoSans-Regular.ttf")).unwrap();
@@ -351,8 +299,6 @@ fn export(path: &str, image_file_names: &[ImageNamePair]) -> Result<(), Error> {
 struct PhotoWindowHandler {
     image: Option<ImageHandle>,
     images: Images,
-    //  image_index: usize,
-    //   image_file_names: Vec<ImageNamePair>,
     screen_resolution: UVec2,
     connection: Arc<Mutex<Connection>>,
     path: String,
@@ -499,34 +445,50 @@ impl WindowHandler for PhotoWindowHandler {
         &mut self,
         helper: &mut WindowHelper,
         virtual_key_code: Option<VirtualKeyCode>,
-        scancode: KeyScancode,
+        _scancode: KeyScancode,
     ) {
         match virtual_key_code {
             Some(VirtualKeyCode::Escape) => match self.state {
+                // exit screen or application
                 RenderState::Help | RenderState::Metadata => {
                     self.state = RenderState::Full;
                     helper.request_redraw()
                 }
                 _ => std::process::exit(0),
             },
-            Some(VirtualKeyCode::Left) => {
+            Some(VirtualKeyCode::Up) => {
                 // prev image
                 self.images.prev();
                 self.image = None;
                 helper.request_redraw();
             }
-            Some(VirtualKeyCode::Right) => {
+            Some(VirtualKeyCode::Left) => {
+                // prev image group
+                self.images.prev_group();
+                self.image = None;
+                helper.request_redraw();
+            }
+            Some(VirtualKeyCode::Down) => {
                 // next image
                 self.images.next();
                 self.image = None;
                 helper.request_redraw();
             }
+
+            Some(VirtualKeyCode::Right) => {
+                // next image
+                self.images.next_group();
+                self.image = None;
+                helper.request_redraw();
+            }
             Some(VirtualKeyCode::LControl) => {
+                // hold down to zoom
                 self.state = RenderState::Zooming;
                 self.image = None;
                 helper.request_redraw();
             }
             Some(VirtualKeyCode::Space) => {
+                // toggle is starred
                 let image = self.images.current_mut();
                 image.is_starred = !image.is_starred;
                 db::update_image_is_starred(
@@ -538,11 +500,13 @@ impl WindowHandler for PhotoWindowHandler {
                 helper.request_redraw();
             }
             Some(VirtualKeyCode::E) if self.state != RenderState::ExportRequested => {
+                // export starred images
                 self.state = RenderState::ExportRequested;
                 self.image = None;
                 helper.request_redraw();
             }
             Some(VirtualKeyCode::F1) => {
+                // toggle help
                 if self.state == RenderState::Help {
                     self.state = RenderState::Full;
                 } else {
@@ -552,6 +516,7 @@ impl WindowHandler for PhotoWindowHandler {
                 helper.request_redraw()
             }
             Some(VirtualKeyCode::F3) => {
+                // toggle image metadata
                 if self.state == RenderState::Metadata {
                     self.state = RenderState::Full;
                 } else {
@@ -562,12 +527,6 @@ impl WindowHandler for PhotoWindowHandler {
             }
             _ => {}
         }
-
-        log::info!(
-            "Got on_key_down callback: {:?}, scancode {}",
-            virtual_key_code,
-            scancode
-        );
     }
 
     fn on_key_up(
@@ -577,6 +536,7 @@ impl WindowHandler for PhotoWindowHandler {
         _scancode: KeyScancode,
     ) {
         if let Some(VirtualKeyCode::LControl) = virtual_key_code {
+            // resume normal viewing
             self.state = RenderState::Full;
             self.image = None;
             helper.request_redraw();

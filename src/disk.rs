@@ -3,7 +3,6 @@ use std::{
     fs,
     path::{Path, PathBuf},
     str::FromStr,
-    time::SystemTime,
 };
 
 use crate::{Error, ImageNamePair};
@@ -28,18 +27,18 @@ pub fn get_file_names(path: &str) -> Result<Vec<ImageNamePair>, Error> {
     let items: Vec<ImageNamePair> = jpegs
         .into_iter()
         .map(|jpeg| {
-            let name = get_lowercase_name_without_extension(&jpeg.0);
+            let name = get_lowercase_name_without_extension(&jpeg);
             match lookup.remove(&name) {
                 Some(files) => ImageNamePair {
-                    jpg_file_name: jpeg.0,
+                    jpg_file_name: jpeg,
                     other_file_names: files,
-                    date_time: jpeg.1,
+                    date_time: None,
                     is_starred: false,
                 },
                 None => ImageNamePair {
-                    jpg_file_name: jpeg.0,
+                    jpg_file_name: jpeg,
                     other_file_names: vec![],
-                    date_time: jpeg.1,
+                    date_time: None,
                     is_starred: false,
                 },
             }
@@ -64,9 +63,9 @@ fn get_lowercase_name_without_extension(name: &str) -> String {
     name.to_lowercase()
 }
 
-fn get_image_file_names(path: &str) -> Result<Vec<(String, SystemTime)>, Error> {
+fn get_image_file_names(path: &str) -> Result<Vec<String>, Error> {
     let directory = std::fs::read_dir(path)?;
-    let mut files: Vec<(String, SystemTime)> = directory
+    let mut files: Vec<String> = directory
         .filter_map(|x| {
             let path = x.expect("cannot read directory");
             let file_name = path.file_name();
@@ -74,14 +73,13 @@ fn get_image_file_names(path: &str) -> Result<Vec<(String, SystemTime)>, Error> 
             if file_name.to_lowercase().ends_with(".jpg")
                 || file_name.to_lowercase().ends_with(".jpeg")
             {
-                let date_time = path.metadata().unwrap().created().unwrap();
-                Some((file_name.to_owned(), date_time))
+                Some(file_name.to_owned())
             } else {
                 None
             }
         })
         .collect();
-    files.sort_by(|a, b| a.1.cmp(&b.1));
+    files.sort();
 
     Ok(files)
 }

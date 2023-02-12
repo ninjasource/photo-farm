@@ -1,5 +1,6 @@
 use std::{fs::File, io::BufReader};
 
+use chrono::NaiveDateTime;
 use exif::{Exif, In, Tag};
 
 use crate::{disk, Error};
@@ -13,6 +14,25 @@ pub struct ImageMetadata {
     pub f_number: Option<String>,
     pub date_time: Option<String>,
     pub focal_length: Option<String>,
+}
+
+pub fn get_date_time(path: &str, name: &str) -> Result<NaiveDateTime, Error> {
+    let file_name = disk::get_full_path(path, name);
+    let file = File::open(file_name)?;
+    let mut reader = BufReader::new(&file);
+    let exif = exif::Reader::new().read_from_container(&mut reader)?;
+
+    match exif.get_field(Tag::DateTime, In::PRIMARY) {
+        Some(field) => {
+            let s = field.display_value().with_unit(&exif).to_string();
+
+            match NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S") {
+                Ok(date_time) => Ok(date_time),
+                Err(e) => Err(Error::ExifDateTime((s, e))),
+            }
+        }
+        None => Err(Error::NoExifDateTime),
+    }
 }
 
 pub fn get_metadata(path: &str, name: &str) -> Result<ImageMetadata, Error> {
