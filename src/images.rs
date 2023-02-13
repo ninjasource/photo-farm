@@ -81,7 +81,7 @@ impl Images {
         let from = from.unwrap();
         let date_time = current.date_time.unwrap();
 
-        // the difference in tamestamp seconds is more than 2 seconds
+        // the difference in timestamp seconds is more than 2 seconds
         if (date_time.timestamp() - from.timestamp()).abs() > 2 {
             return false;
         }

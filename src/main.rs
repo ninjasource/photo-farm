@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -286,7 +288,7 @@ fn encode_jpg(img: &DynamicImage) -> Result<Vec<u8>, Error> {
 }
 
 fn resolution_ok(screen_resolution: UVec2) -> bool {
-    screen_resolution.x > 800
+    screen_resolution.x > 1024
 }
 
 fn export(path: &str, image_file_names: &[ImageNamePair]) -> Result<(), Error> {

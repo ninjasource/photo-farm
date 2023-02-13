@@ -36,3 +36,7 @@ This photo viewer is not meant to edit photos, only to select and organise them.
 ```
 cargo run --release -- /path/to/photos/IMG_0766.JPG
 ```
+
+## Credit
+
+The camera icon comes from IconArchive (https://iconarchive.com)
