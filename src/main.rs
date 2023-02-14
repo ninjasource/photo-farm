@@ -4,7 +4,9 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use std::{env, thread};
 
 use chrono::{NaiveDateTime, ParseError};
@@ -112,6 +114,31 @@ fn main() -> Result<(), Error> {
     let progress_percentage = Arc::new(AtomicI32::new(100));
     let user_event_sender = Arc::new(Mutex::new(window.create_user_event_sender()));
 
+    let (resolution_tx, resolution_rx) = channel();
+
+    let image_file_names = images
+        .all()
+        .iter()
+        .map(|x| x.jpg_file_name.clone())
+        .collect();
+    let image_index = images.current_index();
+
+    // maintain image cache
+    let connection_t = connection.clone();
+    let path_t = path.clone();
+    let progress_percentage_t = progress_percentage.clone();
+    thread::spawn(move || {
+        update_cache(
+            path_t,
+            image_file_names,
+            image_index,
+            connection_t,
+            progress_percentage_t,
+            user_event_sender,
+            resolution_rx,
+        )
+    });
+
     window.run_loop(PhotoWindowHandler {
         image: None,
         images,
@@ -121,7 +148,8 @@ fn main() -> Result<(), Error> {
         state: RenderState::Full,
         font,
         progress_percentage,
-        user_event_sender,
+        resolution_tx,
+        show_only_starred: false,
     })
 }
 
@@ -139,38 +167,6 @@ fn build_file_list(
     }
 
     Ok(image_file_names)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn update_cache_image(
-    path: &str,
-    image_index: usize,
-    num_images: usize,
-    size: UVec2,
-    connection: Arc<Mutex<Connection>>,
-    name: &str,
-    num_processed: &mut usize,
-    progress_percentage: Arc<AtomicI32>,
-    user_event_sender: Arc<Mutex<UserEventSender<()>>>,
-) -> Result<(), Error> {
-    info!(
-        "Resizing image {} of {}: {}",
-        image_index + 1,
-        num_images,
-        name
-    );
-    if db::photo_exists(name, size, connection.clone())? {
-        info!("Photo already exists, skipping...");
-    } else {
-        load_and_insert_image(path, name, size, connection)?;
-    }
-
-    *num_processed += 1;
-    let percentage = (100.0 * *num_processed as f64 / num_images as f64).ceil() as i32;
-    progress_percentage.store(percentage, Ordering::Relaxed);
-    let locked = user_event_sender.lock().unwrap();
-    locked.send_event(()).unwrap();
-    Ok(())
 }
 
 fn load_and_insert_image(
@@ -195,43 +191,81 @@ fn update_cache(
     path: String,
     image_file_names: Vec<String>,
     image_index: usize,
-    size: UVec2,
     connection: Arc<Mutex<Connection>>,
     progress_percentage: Arc<AtomicI32>,
     user_event_sender: Arc<Mutex<UserEventSender<()>>>,
+    resolution_rx: Receiver<UVec2>,
 ) -> Result<(), Error> {
-    let mut num_processed = 0;
     // start resizing from one after the current photo (so we don't duplicate effort on startup)
-    for (i, name) in image_file_names.iter().enumerate().skip(image_index + 1) {
-        update_cache_image(
+    // then continue resizing from start
+    let image_file_names: Vec<&String> = image_file_names
+        .iter()
+        .skip(image_index + 1)
+        .chain(image_file_names.iter().take(image_index + 1))
+        .collect();
+
+    while let Ok(size) = resolution_rx.recv() {
+        // screen resolution can change rapidly on startup, we dont want to do work if not needed
+        thread::sleep(Duration::from_millis(1000));
+        resize_images(
             &path,
-            i,
-            image_file_names.len(),
-            size,
+            &image_file_names,
             connection.clone(),
-            name,
-            &mut num_processed,
             progress_percentage.clone(),
             user_event_sender.clone(),
-        )?
-    }
-
-    // continue resizing from start
-    for (i, name) in image_file_names.iter().enumerate().take(image_index + 1) {
-        update_cache_image(
-            &path,
-            i,
-            image_file_names.len(),
+            &resolution_rx,
             size,
-            connection.clone(),
-            name,
-            &mut num_processed,
-            progress_percentage.clone(),
-            user_event_sender.clone(),
-        )?
+        )?;
     }
 
-    info!("Done resizing");
+    info!("UpdateCache ended");
+    Ok(())
+}
+
+fn resize_images(
+    path: &String,
+    image_file_names: &Vec<&String>,
+    connection: Arc<Mutex<Connection>>,
+    progress_percentage: Arc<AtomicI32>,
+    user_event_sender: Arc<Mutex<UserEventSender<()>>>,
+    resolution_rx: &Receiver<UVec2>,
+    size: UVec2,
+) -> Result<(), Error> {
+    let num_images = image_file_names.len();
+    for (i, image_file) in image_file_names.iter().enumerate() {
+        match resolution_rx.try_recv() {
+            // resolution has changed, we need to start again
+            Ok(size) => {
+                resize_images(
+                    path,
+                    image_file_names,
+                    connection,
+                    progress_percentage,
+                    user_event_sender,
+                    resolution_rx,
+                    size,
+                )?;
+                return Ok(());
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                info!("UpdateCache ended early");
+                return Ok(());
+            }
+        }
+
+        if db::photo_exists(image_file, size, connection.clone())? {
+            info!("Photo already exists, skipping...");
+        } else {
+            load_and_insert_image(path, image_file, size, connection.clone())?;
+        }
+
+        // display progress on the screen
+        let percentage = (100.0 * (i + 1) as f64 / num_images as f64).ceil() as i32;
+        progress_percentage.store(percentage, Ordering::Relaxed);
+        let locked = user_event_sender.lock().unwrap();
+        locked.send_event(()).unwrap();
+    }
     Ok(())
 }
 
@@ -288,7 +322,7 @@ fn encode_jpg(img: &DynamicImage) -> Result<Vec<u8>, Error> {
 }
 
 fn resolution_ok(screen_resolution: UVec2) -> bool {
-    screen_resolution.x > 1024
+    screen_resolution.x >= 1024
 }
 
 fn export(path: &str, image_file_names: &[ImageNamePair]) -> Result<(), Error> {
@@ -307,7 +341,8 @@ struct PhotoWindowHandler {
     state: RenderState,
     font: Font,
     progress_percentage: Arc<AtomicI32>,
-    user_event_sender: Arc<Mutex<UserEventSender<()>>>,
+    resolution_tx: Sender<UVec2>,
+    show_only_starred: bool,
 }
 
 impl WindowHandler for PhotoWindowHandler {
@@ -315,38 +350,12 @@ impl WindowHandler for PhotoWindowHandler {
         helper.request_redraw()
     }
 
-    fn on_resize(&mut self, _helper: &mut WindowHelper<()>, size_pixels: UVec2) {
+    fn on_resize(&mut self, helper: &mut WindowHelper<()>, size_pixels: UVec2) {
         log::info!("Screen resolution changed to: {size_pixels:?}");
         self.screen_resolution = size_pixels;
-
-        // a little trick so that we dont resize on the first call to this on_size function which normally has the generic resolution of 800x600
-        if resolution_ok(size_pixels) {
-            let image_file_names = self
-                .images
-                .all()
-                .iter()
-                .map(|x| x.jpg_file_name.clone())
-                .collect();
-            let size = size_pixels;
-            let connection = self.connection.clone();
-            let path = self.path.clone();
-            let image_index = self.images.current_index();
-            let progress_percentage = self.progress_percentage.clone();
-            let user_event_sender = self.user_event_sender.clone();
-
-            thread::spawn(move || {
-                update_cache(
-                    path,
-                    image_file_names,
-                    image_index,
-                    size,
-                    connection,
-                    progress_percentage,
-                    user_event_sender,
-                )
-            });
-            self.image = None;
-        }
+        self.resolution_tx.send(size_pixels).unwrap();
+        self.image = None;
+        helper.request_redraw();
     }
 
     fn on_draw(&mut self, helper: &mut WindowHelper, graphics: &mut Graphics2D) {
@@ -466,7 +475,11 @@ impl WindowHandler for PhotoWindowHandler {
             }
             Some(VirtualKeyCode::Left) => {
                 // prev image group
-                self.images.prev_group();
+                if self.show_only_starred {
+                    self.images.prev_starred();
+                } else {
+                    self.images.prev_group();
+                }
                 self.image = None;
                 helper.request_redraw();
             }
@@ -479,7 +492,11 @@ impl WindowHandler for PhotoWindowHandler {
 
             Some(VirtualKeyCode::Right) => {
                 // next image
-                self.images.next_group();
+                if self.show_only_starred {
+                    self.images.next_starred();
+                } else {
+                    self.images.next_group();
+                }
                 self.image = None;
                 helper.request_redraw();
             }
@@ -506,6 +523,15 @@ impl WindowHandler for PhotoWindowHandler {
                 self.state = RenderState::ExportRequested;
                 self.image = None;
                 helper.request_redraw();
+            }
+            Some(VirtualKeyCode::S) => {
+                self.show_only_starred = !self.show_only_starred;
+
+                if self.show_only_starred && !self.images.current().is_starred {
+                    self.images.next_starred();
+                    self.image = None;
+                    helper.request_redraw();
+                }
             }
             Some(VirtualKeyCode::F1) => {
                 // toggle help

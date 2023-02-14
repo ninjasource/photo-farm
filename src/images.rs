@@ -116,6 +116,30 @@ impl Images {
         }
     }
 
+    pub fn next_starred(&mut self) {
+        if self.all().iter().any(|x| x.is_starred) {
+            loop {
+                self.next();
+
+                if self.current().is_starred {
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn prev_starred(&mut self) {
+        if self.all().iter().any(|x| x.is_starred) {
+            loop {
+                self.prev();
+
+                if self.current().is_starred {
+                    break;
+                }
+            }
+        }
+    }
+
     pub fn current(&self) -> &ImageNamePair {
         &self.inner[self.index]
     }
