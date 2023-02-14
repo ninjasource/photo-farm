@@ -275,18 +275,25 @@ fn load_image(path: &str, name: &str) -> Result<DynamicImage, Error> {
     let reader = BufReader::new(&file);
     let img = image::load(reader, image::ImageFormat::Jpeg).unwrap();
 
-    let metadata = metadata::get_metadata(path, name)?;
-    info!("{:?}", metadata);
+    match metadata::get_metadata(path, name) {
+        Ok(metadata) => {
+            info!("{:?}", metadata);
 
-    // rotate image if it contains exif metadata to do so
-    let img = match metadata.orientation {
-        Some(8) => img.rotate270(),
-        Some(3) => img.rotate180(),
-        Some(6) => img.rotate90(),
-        _ => img, // do nothing
-    };
+            // rotate image if it contains exif metadata to do so
+            let img = match metadata.orientation {
+                Some(8) => img.rotate270(),
+                Some(3) => img.rotate180(),
+                Some(6) => img.rotate90(),
+                _ => img, // do nothing
+            };
 
-    Ok(img)
+            return Ok(img);
+        }
+        Err(_) => {
+            // some jpegs do not have exif data
+            return Ok(img);
+        }
+    }
 }
 
 fn crop_center(img: DynamicImage, size: UVec2) -> Result<DynamicImage, Error> {
