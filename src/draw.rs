@@ -11,6 +11,20 @@ use std::sync::Arc;
 use crate::calculate_position_middle;
 use crate::metadata::ImageMetadata;
 
+pub fn file_name(graphics: &mut Graphics2D, file_name: &str, font: &Font) {
+    let text = font.layout_text(
+        file_name,
+        20.0,
+        TextOptions::new().with_wrap_to_width(200.0, TextAlignment::Left),
+    );
+
+    graphics.draw_text(
+        Vec2 { x: 10.0, y: 5.0 },
+        Color::from_rgb(0.9, 0.9, 0.8),
+        &text,
+    );
+}
+
 pub fn star(size: UVec2, graphics: &mut Graphics2D) {
     let image_bytes = include_bytes!("../img/star_24px.png");
     let file_bytes = Cursor::new(image_bytes);
@@ -144,12 +158,13 @@ fn table(size: UVec2, graphics: &mut Graphics2D, font: &Font, col0: &str, col1: 
 
 pub fn help(size: UVec2, graphics: &mut Graphics2D, font: &Font) {
     let col0 = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
-        "F1", "F3", "SPACE", "LEFT CTRL", "ESC", "LEFT", "RIGHT", "E", "S",
+        "{}\n\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "Photo Farm", "F1", "F3", "SPACE", "LEFT CTRL", "ESC", "LEFT", "RIGHT", "E", "S", "I",
     );
 
     let col1 = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "An image viewer by David Haig",
         "Toggle help",
         "Toggle EXIF metadata",
         "Toggle star",
@@ -158,7 +173,8 @@ pub fn help(size: UVec2, graphics: &mut Graphics2D, font: &Font) {
         "Previous photo",
         "Next photo",
         "Export starred photos to 'export' folder",
-        "Toggle show starred photos only"
+        "Toggle show starred photos only",
+        "Toggle show file name",
     );
 
     table(size, graphics, font, &col0, &col1);

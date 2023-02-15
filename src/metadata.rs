@@ -16,7 +16,26 @@ pub struct ImageMetadata {
     pub focal_length: Option<String>,
 }
 
-pub fn get_date_time(path: &str, name: &str) -> Result<NaiveDateTime, Error> {
+impl ImageMetadata {
+    pub fn try_get_timestamp_from_date_time(&self) -> i64 {
+        match self.date_time.as_deref() {
+            Some(date_time) => match string_to_unix_timestamp(date_time) {
+                Ok(timestamp) => timestamp,
+                Err(_) => 0,
+            },
+            _ => 0,
+        }
+    }
+}
+
+fn string_to_unix_timestamp(s: &str) -> Result<i64, Error> {
+    match NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S") {
+        Ok(date_time) => Ok(date_time.timestamp()),
+        Err(e) => Err(Error::ExifDateTime((s.to_owned(), e))),
+    }
+}
+
+pub fn _get_date_time(path: &str, name: &str) -> Result<NaiveDateTime, Error> {
     let file_name = disk::get_full_path(path, name);
     let file = File::open(file_name)?;
     let mut reader = BufReader::new(&file);

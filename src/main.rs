@@ -14,6 +14,7 @@ use image::imageops::FilterType;
 use image::DynamicImage;
 use images::Images;
 use log::{error, info};
+use metadata::ImageMetadata;
 use speedy2d::color::Color;
 use speedy2d::dimen::{UVec2, Vec2};
 use speedy2d::font::Font;
@@ -150,6 +151,7 @@ fn main() -> Result<(), Error> {
         progress_percentage,
         resolution_tx,
         show_only_starred: false,
+        show_file_name: false,
     })
 }
 
@@ -175,9 +177,9 @@ fn load_and_insert_image(
     size: UVec2,
     connection: Arc<Mutex<Connection>>,
 ) -> Result<Vec<u8>, Error> {
-    let img = load_image(path, name)?;
+    let (img, metadata) = load_image(path, name)?;
     let resized = resize_jpg(&img, size)?;
-    db::insert_image(name, size, &resized, connection)?;
+    db::insert_image(name, size, &resized, metadata, connection)?;
     Ok(resized)
 }
 
@@ -269,7 +271,7 @@ fn resize_images(
     Ok(())
 }
 
-fn load_image(path: &str, name: &str) -> Result<DynamicImage, Error> {
+fn load_image(path: &str, name: &str) -> Result<(DynamicImage, Option<ImageMetadata>), Error> {
     let file_name = disk::get_full_path(path, name);
     let file = File::open(file_name)?;
     let reader = BufReader::new(&file);
@@ -287,11 +289,11 @@ fn load_image(path: &str, name: &str) -> Result<DynamicImage, Error> {
                 _ => img, // do nothing
             };
 
-            return Ok(img);
+            return Ok((img, Some(metadata)));
         }
         Err(_) => {
             // some jpegs do not have exif data
-            return Ok(img);
+            return Ok((img, None));
         }
     }
 }
@@ -350,6 +352,7 @@ struct PhotoWindowHandler {
     progress_percentage: Arc<AtomicI32>,
     resolution_tx: Sender<UVec2>,
     show_only_starred: bool,
+    show_file_name: bool,
 }
 
 impl WindowHandler for PhotoWindowHandler {
@@ -400,7 +403,7 @@ impl WindowHandler for PhotoWindowHandler {
                     }
                     RenderState::Zooming => {
                         helper.set_cursor_visible(true);
-                        let img = load_image(&self.path, name).unwrap();
+                        let (img, _) = load_image(&self.path, name).unwrap();
                         let img = crop_center(img, self.screen_resolution).unwrap();
                         draw::image_full(img, graphics);
                     }
@@ -448,6 +451,10 @@ impl WindowHandler for PhotoWindowHandler {
 
             if image_file.is_starred {
                 draw::star(self.screen_resolution, graphics);
+            }
+
+            if self.show_file_name {
+                draw::file_name(graphics, &image_file.jpg_file_name, &self.font);
             }
 
             draw::progress_text(
@@ -558,6 +565,10 @@ impl WindowHandler for PhotoWindowHandler {
                     self.state = RenderState::Metadata;
                 }
                 self.image = None;
+                helper.request_redraw()
+            }
+            Some(VirtualKeyCode::I) => {
+                self.show_file_name = !self.show_file_name;
                 helper.request_redraw()
             }
             _ => {}

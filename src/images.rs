@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use chrono::NaiveDateTime;
 use log::error;
 
@@ -42,7 +44,7 @@ impl Images {
         let current = self.current_mut();
 
         if current.date_time.is_none() {
-            match metadata::get_date_time(path, &current.jpg_file_name) {
+            match metadata::_get_date_time(path, &current.jpg_file_name) {
                 Ok(date_time) => current.date_time = Some(date_time),
                 Err(e) => {
                     error!("error fetching exif date time {e:?}");
@@ -52,9 +54,12 @@ impl Images {
     }
 
     pub fn next_group(&mut self) {
-        let from = self.current().date_time;
+        // use this until groups are working properly
+        self.next();
 
+        /*
         loop {
+            let from = self.current().date_time;
             if self.index == self.inner.len() - 1 {
                 self.index = 0;
                 break;
@@ -67,7 +72,7 @@ impl Images {
                     break;
                 }
             }
-        }
+        }*/
     }
 
     fn is_in_group(&mut self, from: Option<NaiveDateTime>) -> bool {
@@ -81,8 +86,8 @@ impl Images {
         let from = from.unwrap();
         let date_time = current.date_time.unwrap();
 
-        // the difference in timestamp seconds is more than 2 seconds
-        if (date_time.timestamp() - from.timestamp()).abs() > 2 {
+        // the difference in timestamp seconds is more than 1 seconds
+        if (date_time.timestamp() - from.timestamp()).abs() > 1 {
             return false;
         }
 
@@ -98,9 +103,12 @@ impl Images {
     }
 
     pub fn prev_group(&mut self) {
-        let from = self.current().date_time;
+        // use this until groups are working properly
+        self.prev();
 
+        /*
         loop {
+            let from = self.current().date_time;
             if self.index == 0 {
                 self.index = self.inner.len() - 1;
                 break;
@@ -113,7 +121,7 @@ impl Images {
                     break;
                 }
             }
-        }
+        }*/
     }
 
     pub fn next_starred(&mut self) {
