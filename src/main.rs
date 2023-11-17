@@ -11,7 +11,7 @@ use std::{env, thread};
 
 use chrono::{NaiveDateTime, ParseError};
 use image::imageops::FilterType;
-use image::DynamicImage;
+use image::{DynamicImage, GenericImageView};
 use images::Images;
 use log::{error, info};
 use metadata::ImageMetadata;
@@ -117,12 +117,30 @@ fn main() -> Result<(), Error> {
 
     let (resolution_tx, resolution_rx) = channel();
 
-    let image_file_names = images
+    let image_file_names: Vec<String> = images
         .all()
         .iter()
         .map(|x| x.jpg_file_name.clone())
         .collect();
     let image_index = images.current_index();
+    let (tx, rx) = channel();
+
+    // listen for resize requests
+    let path_c = path.clone();
+    let image_file_names_c = image_file_names.clone();
+    let connection_c = connection.clone();
+    let progress_percentage_c = progress_percentage.clone();
+    let user_event_sender_c = user_event_sender.clone();
+    thread::spawn(move || {
+        resize_and_export(
+            &path_c,
+            &image_file_names_c,
+            connection_c,
+            rx,
+            progress_percentage_c,
+            user_event_sender_c,
+        )
+    });
 
     // maintain image cache
     let connection_t = connection.clone();
@@ -152,6 +170,7 @@ fn main() -> Result<(), Error> {
         resolution_tx,
         show_only_starred: false,
         show_file_name: false,
+        resize_request_tx: tx,
     })
 }
 
@@ -289,11 +308,11 @@ fn load_image(path: &str, name: &str) -> Result<(DynamicImage, Option<ImageMetad
                 _ => img, // do nothing
             };
 
-            return Ok((img, Some(metadata)));
+            Ok((img, Some(metadata)))
         }
         Err(_) => {
             // some jpegs do not have exif data
-            return Ok((img, None));
+            Ok((img, None))
         }
     }
 }
@@ -334,6 +353,54 @@ fn resolution_ok(screen_resolution: UVec2) -> bool {
     screen_resolution.x >= 1024
 }
 
+fn resize_and_export(
+    path: &str,
+    image_file_names: &[String],
+    connection: Arc<Mutex<Connection>>,
+    rx: Receiver<f32>,
+    progress_percentage: Arc<AtomicI32>,
+    user_event_sender: Arc<Mutex<UserEventSender<()>>>,
+) -> Result<(), Error> {
+    loop {
+        match rx.recv() {
+            Ok(resize_factor) => {
+                //progress_percentage.store(0, Ordering::Relaxed);
+                let names = db::get_starred_image_names(connection.clone())?;
+                let starred_images: Vec<&String> = image_file_names
+                    .iter()
+                    .filter(|x| names.contains(*x))
+                    .collect();
+
+                {
+                    progress_percentage.store(0, Ordering::Relaxed);
+                    let locked = user_event_sender.lock().unwrap();
+                    locked.send_event(()).unwrap();
+                }
+
+                for (i, starred_image) in starred_images.iter().enumerate() {
+                    let name = starred_image;
+                    let (img, _metadata) = load_image(path, name)?;
+                    let (x, y) = img.dimensions();
+                    let size = UVec2 {
+                        x: (x as f32 * resize_factor) as u32,
+                        y: (y as f32 * resize_factor) as u32,
+                    };
+                    let resized = resize_jpg(&img, size)?;
+                    disk::export_image(path, name, &resized)?;
+
+                    // display progress on the screen
+                    let percentage =
+                        (100.0 * (i + 1) as f64 / starred_images.len() as f64).ceil() as i32;
+                    progress_percentage.store(percentage, Ordering::Relaxed);
+                    let locked = user_event_sender.lock().unwrap();
+                    locked.send_event(()).unwrap();
+                }
+            }
+            Err(_) => return Ok(()),
+        }
+    }
+}
+
 fn export(path: &str, image_file_names: &[ImageNamePair]) -> Result<(), Error> {
     let starred_images: Vec<&ImageNamePair> =
         image_file_names.iter().filter(|x| x.is_starred).collect();
@@ -353,6 +420,7 @@ struct PhotoWindowHandler {
     resolution_tx: Sender<UVec2>,
     show_only_starred: bool,
     show_file_name: bool,
+    resize_request_tx: Sender<f32>,
 }
 
 impl WindowHandler for PhotoWindowHandler {
@@ -547,7 +615,7 @@ impl WindowHandler for PhotoWindowHandler {
                     helper.request_redraw();
                 }
             }
-            Some(VirtualKeyCode::F1) => {
+            Some(VirtualKeyCode::H) | Some(VirtualKeyCode::F1) => {
                 // toggle help
                 if self.state == RenderState::Help {
                     self.state = RenderState::Full;
@@ -569,6 +637,46 @@ impl WindowHandler for PhotoWindowHandler {
             }
             Some(VirtualKeyCode::I) => {
                 self.show_file_name = !self.show_file_name;
+                helper.request_redraw()
+            }
+            Some(VirtualKeyCode::Key1) => {
+                self.resize_request_tx.send(0.1).unwrap();
+                helper.request_redraw()
+            }
+            Some(VirtualKeyCode::Key2) => {
+                self.resize_request_tx.send(0.2).unwrap();
+                helper.request_redraw()
+            }
+            Some(VirtualKeyCode::Key3) => {
+                self.resize_request_tx.send(0.3).unwrap();
+                helper.request_redraw()
+            }
+            Some(VirtualKeyCode::Key4) => {
+                self.resize_request_tx.send(0.4).unwrap();
+                helper.request_redraw()
+            }
+            Some(VirtualKeyCode::Key5) => {
+                self.resize_request_tx.send(0.5).unwrap();
+                helper.request_redraw()
+            }
+            Some(VirtualKeyCode::Key6) => {
+                self.resize_request_tx.send(0.6).unwrap();
+                helper.request_redraw()
+            }
+            Some(VirtualKeyCode::Key7) => {
+                self.resize_request_tx.send(0.7).unwrap();
+                helper.request_redraw()
+            }
+            Some(VirtualKeyCode::Key8) => {
+                self.resize_request_tx.send(0.8).unwrap();
+                helper.request_redraw()
+            }
+            Some(VirtualKeyCode::Key9) => {
+                self.resize_request_tx.send(0.9).unwrap();
+                helper.request_redraw()
+            }
+            Some(VirtualKeyCode::Key0) => {
+                self.resize_request_tx.send(1.0).unwrap();
                 helper.request_redraw()
             }
             _ => {}

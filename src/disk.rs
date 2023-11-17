@@ -103,6 +103,17 @@ fn get_other_file_names(path: &str) -> Result<Vec<String>, Error> {
     Ok(files)
 }
 
+pub fn export_image(path: &str, name: &str, image: &[u8]) -> Result<(), Error> {
+    let mut to_path =
+        PathBuf::from_str(path).unwrap_or_else(|_| panic!("not a falid path: {path}"));
+    to_path.push("export");
+    let to_path = to_path.to_str().expect("path is empty");
+    fs::create_dir_all(to_path)?;
+    let to_file = get_full_path(to_path, name);
+    fs::write(to_file, image)?;
+    Ok(())
+}
+
 pub fn export(path: &str, image_pairs: &[&ImageNamePair]) -> Result<(), Error> {
     let mut to_path =
         PathBuf::from_str(path).unwrap_or_else(|_| panic!("not a falid path: {path}"));

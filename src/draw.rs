@@ -158,12 +158,23 @@ fn table(size: UVec2, graphics: &mut Graphics2D, font: &Font, col0: &str, col1: 
 
 pub fn help(size: UVec2, graphics: &mut Graphics2D, font: &Font) {
     let col0 = format!(
-        "{}\n\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
-        "Photo Farm", "F1", "F3", "SPACE", "LEFT CTRL", "ESC", "LEFT", "RIGHT", "E", "S", "I",
+        "{}\n\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "Photo Farm",
+        "F1",
+        "F3",
+        "SPACE",
+        "LEFT CTRL",
+        "ESC",
+        "LEFT",
+        "RIGHT",
+        "E",
+        "S",
+        "I",
+        "1 2 3 4 5 6 7 8 9 0",
     );
 
     let col1 = format!(
-        "{}\n\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         "An image viewer by David Haig",
         "Toggle help",
         "Toggle EXIF metadata",
@@ -175,6 +186,7 @@ pub fn help(size: UVec2, graphics: &mut Graphics2D, font: &Font) {
         "Export starred photos to 'export' folder",
         "Toggle show starred photos only",
         "Toggle show file name",
+        "Resize to 10-100% and export starred photos to 'export' folder",
     );
 
     table(size, graphics, font, &col0, &col1);
